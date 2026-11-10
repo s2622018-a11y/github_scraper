@@ -6,14 +6,14 @@ import requests
 from bs4 import BeautifulSoup
 
 # 1. 設定項目
-# 課題要件: Googleが管理するリポジトリの一覧ページを指定
-TARGET_URL = "[suspicious link removed]"
+TARGET_URL = "https://github.com/orgs/google/repositories"
 DB_PATH = os.path.join("db", "github_repos.db")
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
 }
 
 
@@ -34,24 +34,46 @@ def fetch_repository_page(url: str) -> BeautifulSoup:
 
 
 def extract_repository_data(soup: BeautifulSoup):
-    items = soup.select("li.Box-row")
     repositories = []
 
-    for item in items:
-        # ① リポジトリ名の取得
-        repo_link = item.select_one("h3 a") or item.select_one("a[href*='/']")
-        if repo_link is None:
-            continue
+    # リポジトリのリンクを取得
+    repo_links = soup.select("a[itemprop='name codeRepository']")
+    if not repo_links:
+        repo_links = [a for a in soup.select("h3 a") if "/google/" in a.get("href", "")]
 
-        name = repo_link.get_text(" ", strip=True) or "Unknown"
-        
-        # ② 言語の取得
-        language_elem = item.select_one('[itemprop="programmingLanguage"]')
-        language = language_elem.get_text(" ", strip=True) if language_elem else "N/A"
+    for a_tag in repo_links:
+        name = a_tag.get_text(strip=True)
 
-        # ③ Starsの取得
-        star_elem = item.select_one('a[href*="/stargazers"]')
-        stars = star_elem.get_text(" ", strip=True) if star_elem else "0"
+        # ①リポジトリ枠（カード全体の親要素）を取得
+        card = a_tag.find_parent("li")
+        if not card:
+            card = a_tag.find_parent("div", class_=lambda c: c and "Box" in c)
+        if not card and a_tag.parent:
+            card = a_tag.parent.parent
+
+        language = "N/A"
+        stars = "0"
+
+        if card:
+            # ② 主要言語の抽出 (様々なHTMLパターンを網羅)
+            lang_elem = (
+                card.find(attrs={"itemprop": "programmingLanguage"})
+                or card.select_one('[data-filterable-for] span[class*="color"]')
+                or card.select_one("span[class*='language']")
+            )
+            
+            if lang_elem:
+                language = lang_elem.get_text(strip=True)
+            else:
+                # itempropで見つからない場合、言語ドット（span.repo-language-colorなど）の隣のテキストを取得
+                color_dot = card.select_one("span.repo-language-color, span[style*='background-color']")
+                if color_dot and color_dot.next_sibling:
+                    language = color_dot.next_sibling.text.strip()
+
+            # ③ Starsの抽出
+            star_elem = card.select_one('a[href*="/stargazers"]') or card.select_one('a[href*="/stargazer"]')
+            if star_elem:
+                stars = star_elem.get_text(strip=True).replace(",", "")
 
         repositories.append((name, language, stars))
 
@@ -63,9 +85,13 @@ def save_repositories(repositories):
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
+        
+        # 既存のテーブルを一旦削除してIDを1からリセットできるようにする
+        cursor.execute("DROP TABLE IF EXISTS repositories")
+        
         cursor.execute(
             """
-            CREATE TABLE IF NOT EXISTS repositories (
+            CREATE TABLE repositories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
                 language TEXT,
@@ -73,7 +99,6 @@ def save_repositories(repositories):
             )
             """
         )
-        cursor.execute("DELETE FROM repositories")
 
         for name, language, stars in repositories:
             cursor.execute(
@@ -83,10 +108,11 @@ def save_repositories(repositories):
 
         conn.commit()
 
-# 課題要件: SELECT文を使って保存データを取得・画面表示する
+        # 課題要件: SELECT文を使って保存データを取得・画面表示する
         print("=== SQLite保存データ (SELECT文実行結果) ===")
         cursor.execute("SELECT id, name, language, stars FROM repositories")
-        for row in cursor.fetchall():
+        rows = cursor.fetchall()
+        for row in rows:
             print(f"ID: {row[0]} | リポジトリ名: {row[1]} | 言語: {row[2]} | Stars: {row[3]}")
 
 
@@ -98,6 +124,7 @@ def main():
         soup = BeautifulSoup("", "html.parser")
 
     repositories = extract_repository_data(soup)
+    print(f"取得できた件数: {len(repositories)} 件")
     save_repositories(repositories)
 
 
